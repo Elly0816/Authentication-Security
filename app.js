@@ -36,6 +36,7 @@ const userSchema = new mongoose.Schema({
     googleId: String,
     name: String,
     facebookId: String,
+    secrets: [{ secret: String }]
 });
 
 userSchema.plugin(passportLocalMongoose);
@@ -55,7 +56,6 @@ passport.use(new GoogleStrategy({ //Authenticate with google//////
         state: true
     },
     function(accessToken, refreshToken, profile, cb) {
-        console.log(profile);
         User.findOne({ googleId: profile.id }, (err, cred) => {
             if (err) {
                 return cb(err);
@@ -63,7 +63,7 @@ passport.use(new GoogleStrategy({ //Authenticate with google//////
             if (!cred) {
                 // The account at Google has not logged in to this app before.  Create a
                 // new user record and associate it with the Google account.
-                User.create({ googleId: profile.id, name: profile.displayName }, (err) => {
+                User.create({ googleId: profile.id, name: profile.displayName, username: `${profile.provider} ${profile.id}` }, (err) => {
                     if (err) {
                         return cb(err);
                     }
@@ -91,12 +91,12 @@ passport.use(new FacebookStrategy({
     function(accessToken, refreshToken, profile, cb) {
         User.findOne({ facebookId: profile.id }, (err, user) => {
             if (err) {
-                console.log(err);
+                return err;
                 return cb(err);
             } else if (!user) {
-                User.create({ facebookId: profile.id }, (err, user) => {
+                User.create({ facebookId: profile.id, name: profile.displayName, username: `${profile.provider} ${profile.id}` }, (err, user) => {
                     if (err) {
-                        console.log(err);
+                        return err;
                         return cb(err);
                     } else {
                         User.findOne({ facebookId: profile.id }, (err, user) => {
@@ -105,7 +105,7 @@ passport.use(new FacebookStrategy({
                     }
                 });
             } else {
-                return cb(user);
+                return cb(err, user);
             };
         });
     }
@@ -145,27 +145,24 @@ app.route("/login")
         res.render("pages/login");
     })
     .post((req, res) => {
-        User.findOne({ email: req.body.email }, (err, found) => {
+        User.findOne({ username: req.body.email }, (err, found) => {
             if (err) {
-                console.log(error);
+                return (error);
             } else if (!found) {
                 res.redirect("/register");
             } else {
                 const authenticate = User.authenticate();
                 authenticate(req.body.email, req.body.password, (err, user) => { //user is a boolean
                     if (err) {
-                        console.log(err);
+                        return err;
                         res.redirect("/login");
                     } else if (!user) { //If user returns false
-                        console.log(`Incorrect username or password: ${user}`);
                         res.redirect("/login");
                     } else { //If user returns true
-                        console.log(`This is the result of authenticating the user: ${user}`);
                         req.login(user, (err) => {
                             if (err) {
-                                console.log(err);
+                                return err;
                             } else {
-                                console.log("Logged in, redirecting to secrets");
                                 res.redirect("/secrets");
                             }
                         });
@@ -181,63 +178,134 @@ app.route("/register")
         res.render("pages/register");
     })
     .post((req, res) => {
-        User.register(new User({ username: req.body.email }), req.body.password,
-            (err) => {
-                if (err) {
-                    console.log(err);
-                    res.redirect("/register");
-                } else {
-                    const authenticate = User.authenticate('local');
-                    authenticate(req.body.email, req.body.password, (err, user) => { //user is a boolean
+        // Check if the user already exists
+        User.findOne({ username: req.body.email }, (err, found) => {
+            if (err) {
+                return err;
+            } else if (found) {
+                res.redirect("/login");
+            } else {
+                // Registers if the user has not been registered
+                User.register(new User({ username: req.body.email }), req.body.password,
+                    (err) => {
                         if (err) {
-                            console.log(err);
-                            console.log("There was an error with authentication")
+                            return err;
                             res.redirect("/register");
                         } else {
-                            console.log(`This is the result of authenticating the user ${user}`);
-                            req.login(user, (err) => {
+                            const authenticate = User.authenticate('local');
+                            authenticate(req.body.email, req.body.password, (err, user) => { //user is a boolean
                                 if (err) {
-                                    console.log(err);
+                                    return err;
+                                    res.redirect("/register");
                                 } else {
-                                    console.log("Logged in after registering");
-                                    console.log("Registered, redirecting to secrets page");
-                                    res.redirect("/secrets");
+                                    req.login(user, (err) => {
+                                        if (err) {
+                                            return err;
+                                        } else {
+                                            res.redirect("/secrets");
+                                        }
+                                    });
+
                                 }
                             });
-
                         }
                     });
-                }
-            });
+            }
+        });
+
     });
 
-app.route("/secrets")
-    .get((req, res) => {
-        if (req.isAuthenticated()) {
-            console.log("Authenticated, showing secrets.");
-            res.render("pages/secrets");
+app.get("/secrets", (req, res) => {
+    User.find({}, (err, users) => {
+        if (err) {
+            return err;
         } else {
-            console.log("Not logged in, redirecting to login page");
-            res.redirect("/login");
-        };
+            let showSecrets = [];
+            users.forEach(user => user.secrets.forEach(
+                secret => showSecrets.push(secret.secret)
+            ));
+            // console.log("Authenticated, showing secrets.");
+            showSecrets = shuffle(showSecrets);
+            res.render("pages/secrets", { secrets: showSecrets });
+        }
     });
-// .post()
-
-app.get("/submit", (req, res) => { //Get request to the submit page
-    res.render("pages/submit");
 });
-// .post()
+
+
+app.route("/submit")
+    .get((req, res) => { //Get request to the submit page
+        if (req.isAuthenticated()) {
+            res.render("pages/submit");
+        } else {
+            res.redirect("/login");
+        }
+    })
+    .post((req, res) => {
+        if (req.isAuthenticated()) {
+            const secret = req.body.secret;
+            const currentUser = req.user;
+            if (!(currentUser.googleId || currentUser.facebookId)) { // Uses the username field instead
+                User.findOneAndUpdate({ username: currentUser.username }, { $push: { secrets: { secret: secret } } }, (err, user) => {
+                    if (err) {
+                        return err;
+                    } else {
+                        res.redirect("/secrets");
+                    }
+                });
+            } else if (currentUser.googleId) { //Uses the googleId field instead
+                User.findOneAndUpdate({ googleId: currentUser.googleId }, { $push: { secrets: { secret: secret } } }, (err, user) => {
+                    if (err) {
+                        return err;
+                    } else {
+                        res.redirect("/secrets");
+                    }
+                });
+            } else { //If none of the above conditions satisfy, uses the facebookId field
+                User.findOneAndUpdate({ facebookId: currentUser.facebookId }, { $push: { secrets: { secret: secret } } }, (err, user) => {
+                    if (err) {
+                        return err;
+                    } else {
+                        res.redirect("/secrets");
+                    }
+                });
+            }
+
+        } else {
+            res.redirect("/login");
+        }
+
+
+        // User.findOneAndUpdate
+    });
 
 app.get("/logout", (req, res) => {
     req.logout((err) => {
         if (err) {
-            console.log(err);
+            return err;
         }
     });
-    console.log("Logged out successfully");
     res.redirect("/");
 });
 
 app.listen(port, () => {
     console.log("Server up and running");
 });
+
+function shuffle(array) {
+    let currentIndex = array.length,
+        randomIndex;
+    // While there remain elements to shuffle.
+    while (currentIndex != 0) {
+
+        // Pick a remaining element.
+        randomIndex = Math.floor(Math.random() * currentIndex);
+        currentIndex--;
+
+        // And swap it with the current element.
+        [array[currentIndex], array[randomIndex]] = [
+            array[randomIndex], array[currentIndex]
+        ];
+    }
+
+    return array;
+}
